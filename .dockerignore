@@ -1,0 +1,12 @@
+.git
+.github
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+tests/
+*.html
+*.png
+*_debug_output.txt
+train_schedule_*.json

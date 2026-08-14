@@ -1092,21 +1092,9 @@ def merge_duplicate_stations(stations):
 # ============================================================
 
 def parse_train_response(
-    file_name="response.html",
+    html,
     requested_train_no=None
 ):
-
-    # --------------------------------------------------------
-    # Read HTML
-    # --------------------------------------------------------
-
-    with open(
-        file_name,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        html = f.read()
 
     soup = BeautifulSoup(
         html,
@@ -1365,8 +1353,11 @@ def parse_train_response(
 
 if __name__ == "__main__":
 
+    with open("response.html", "r", encoding="utf-8") as f:
+        sample_html = f.read()
+
     result = parse_train_response(
-        file_name="response.html",
+        html=sample_html,
         requested_train_no="12904"
     )
 

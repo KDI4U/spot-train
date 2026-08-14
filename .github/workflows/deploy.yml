@@ -1,0 +1,65 @@
+name: Build and Deploy Railway API to Azure Container Registry
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - '**'
+      - '!**.md'
+  workflow_dispatch:
+
+env:
+  REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+  REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+  REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+  IMAGE_NAME: railway-api-image
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        run: |
+          git clone --depth 1 --branch ${{ github.ref_name }} https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} .
+          git checkout ${{ github.sha }}
+
+      - name: Set up Docker Buildx
+        run: |
+          docker buildx create --use --name mybuilder || docker buildx use mybuilder
+          docker buildx inspect --bootstrap
+
+      - name: Log in to Azure Container Registry
+        run: |
+          echo "${{ env.REGISTRY_PASSWORD }}" | docker login ${{ env.REGISTRY_URL }} \
+            --username ${{ env.REGISTRY_USERNAME }} \
+            --password-stdin
+
+      - name: Build and push Docker image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile \
+            --tag ${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --tag ${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAME }}:latest \
+            --push \
+            .
+
+      - name: Logout from Docker Registry
+        if: always()
+        run: docker logout ${{ env.REGISTRY_URL }}
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Restart App Service
+        run: az webapp restart --name railway-api --resource-group rg-website-prod
+
+      - name: Logout from Azure CLI
+        if: always()
+        run: az logout

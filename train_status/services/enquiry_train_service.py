@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 import time
 
 from selenium import webdriver
@@ -82,6 +83,14 @@ def create_driver():
     options.add_argument(
         "--disable-blink-features=AutomationControlled"
     )
+
+    # In the Docker image, Chromium is installed at a fixed path (CHROME_BIN) rather than a
+    # "chrome" binary on PATH -- Selenium Manager can't reliably find it otherwise. Left unset
+    # for local dev, where Selenium Manager resolves an installed Chrome/Chromium automatically.
+    chrome_bin = os.getenv("CHROME_BIN")
+
+    if chrome_bin:
+        options.binary_location = chrome_bin
 
     driver = webdriver.Chrome(
         options=options

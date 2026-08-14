@@ -11,7 +11,7 @@ from train_status.services.enquiry_train_service import (
 
 
 router = APIRouter(
-    prefix="/enquiry/train",
+    prefix="/api/railway/enquiry/train",
     tags=["Enquiry Train"]
 )
 

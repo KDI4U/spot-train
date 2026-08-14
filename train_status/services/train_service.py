@@ -24,17 +24,9 @@ class TrainService:
             journey_date=ntes_date
         )
 
-        with open(
-            "live_response.html",
-            "w",
-            encoding="utf-8"
-        ) as file:
-            file.write(html)
-
         result = parse_train_response(
-            file_name="live_response.html",
+            html=html,
             requested_train_no=train_no
         )
 
-        # Important: comma mat lagana
         return result

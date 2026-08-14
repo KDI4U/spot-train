@@ -23,14 +23,14 @@ app = FastAPI(
 
 app.include_router(
     train_router,
-    prefix="/api/v1/train",
+    prefix="/api/railway/train",
     tags=["Train"]
 )
 
 
 app.include_router(
     pnr_router,
-    prefix="/api/v1/pnr",
+    prefix="/api/railway/pnr",
     tags=["PNR"]
 )
 
