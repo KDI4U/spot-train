@@ -246,23 +246,15 @@ def parse_station(row):
     # it has actually reached).
     # --------------------------------------------------------
 
-    if is_source:
-
-        distance_km = 0
-
-    else:
-
-        distance_match = re.search(
-            r"Coach\s+Position\s+(\d+)\s*KMs",
-            row_text,
-            re.IGNORECASE
-        )
-
-        distance_km = (
-            int(distance_match.group(1))
-            if distance_match
-            else None
-        )
+    # Verified against a real NTES stop-train page: a halting station's row (div.stopRow,
+    # what this function parses) never carries a KM-from-source figure anywhere in its text.
+    # "Coach Position" is an unrelated modal button (physical coach layout on the platform,
+    # opened via data-bs-toggle="modal") that happens to reuse similar wording -- it is not a
+    # distance marker. A bare "<b>N</b> KMs" distance value does exist on the page, but only
+    # on the separate non-stopping/pass-through rows (div.nonStopRow) this parser does not
+    # collect. So there is no reliable per-stop distance signal available here; leave it null
+    # except for the source, which is unambiguously 0.
+    distance_km = 0 if is_source else None
 
     # ========================================================
     # FOUR TIMES
@@ -638,7 +630,105 @@ def _sanitize_current_station(name):
     return cleaned
 
 
-def parse_current_running_info(full_text):
+def _match_movement_banner(text):
+    """
+    Matches NTES's simple movement-banner phrasing:
+
+        Departed from BHAWANI MANDI(BWM) at 11:46 14-Aug (Delay: 00:06)
+        Arrived at BHAWANI MANDI(BWM) at 11:46 14-Aug (Delay: 00:06)
+
+    This is the exact phrasing used inside the page's single, purpose-built
+    <h6 class="text-primary"> status element (see CASE 0 below), and is tried first there
+    against just that short string. It is also tried again further down against the wider
+    scoped page text, as a fallback for when that element isn't found.
+    """
+
+    patterns = [
+        (
+            "Departed",
+            re.compile(
+                r"Departed\s+from\s+"
+                r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
+                r"\s+at\s+"
+                r"(\d{1,2}:\d{2})\s+"
+                r"(\d{1,2}-[A-Za-z]{3})"
+                r"\s*"
+                r"\(Delay:\s*([^)]+)\)",
+                re.IGNORECASE
+            )
+        ),
+        (
+            "Departed",
+            re.compile(
+                r"Departed\s+from\s+"
+                r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
+                r"\s+at\s+"
+                r"(\d{1,2}:\d{2})\s+"
+                r"(\d{1,2}-[A-Za-z]{3})"
+                r".{0,30}?"
+                r"Delay:\s*([0-9:]+)",
+                re.IGNORECASE
+            )
+        ),
+        (
+            "Arrived",
+            re.compile(
+                r"Arrived\s+at\s+"
+                r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
+                r"\s+at\s+"
+                r"(\d{1,2}:\d{2})\s+"
+                r"(\d{1,2}-[A-Za-z]{3})"
+                r"\s*"
+                r"\(Delay:\s*([^)]+)\)",
+                re.IGNORECASE
+            )
+        ),
+        (
+            "Arrived",
+            re.compile(
+                r"Arrived\s+at\s+"
+                r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
+                r"\s+at\s+"
+                r"(\d{1,2}:\d{2})\s+"
+                r"(\d{1,2}-[A-Za-z]{3})"
+                r".{0,30}?"
+                r"Delay:\s*([0-9:]+)",
+                re.IGNORECASE
+            )
+        )
+    ]
+
+    for movement_type, pattern in patterns:
+
+        match = pattern.search(text)
+
+        if not match:
+            continue
+
+        # Reject and keep trying the next pattern/case rather than returning: a match whose
+        # captured group isn't a plausible station name means the "at HH:MM DD-Mon" terminator
+        # this pattern expects wasn't actually nearby, and .+? backtracked across unrelated
+        # page content instead (see _sanitize_current_station).
+        sanitized = _sanitize_current_station(
+            match.group(1)
+        )
+
+        if not sanitized:
+            continue
+
+        return {
+            "type": movement_type,
+            "current_station": sanitized,
+            "delay": clean_text(match.group(4)),
+            "movement_time": match.group(2),
+            "movement_date": match.group(3),
+            "distance_km": None
+        }
+
+    return None
+
+
+def parse_current_running_info(full_text, scope=None):
 
     # --------------------------------------------------------
     # Normalize text for reliable matching
@@ -647,120 +737,39 @@ def parse_current_running_info(full_text):
     normalized_text = clean_text(full_text)
 
     # ========================================================
-    # CASE 1
+    # CASE 0
     #
-    # Departed from BHAWANI MANDI(BWM)
-    # at 11:46 14-Aug
-    # (Delay: 00:06)
+    # NTES renders the current-running status in a single, purpose-built element:
+    # <h6 class="text-primary"><b>Arrived at BIHTA(BTA) at 12:12 14-Aug (Delay: 01:09)</b></h6>
+    # This is the least ambiguous signal on the page -- try it first, scoped to just that
+    # element's own short text, before falling back to scanning the wider page below (which
+    # can contain similar-looking phrases elsewhere, e.g. other days' history).
     # ========================================================
 
-    departed_patterns = [
-        re.compile(
-            r"Departed\s+from\s+"
-            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
-            r"\s+at\s+"
-            r"(\d{1,2}:\d{2})\s+"
-            r"(\d{1,2}-[A-Za-z]{3})"
-            r"\s*"
-            r"\(Delay:\s*([^)]+)\)",
-            re.IGNORECASE
-        ),
-        re.compile(
-            r"Departed\s+from\s+"
-            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
-            r"\s+at\s+"
-            r"(\d{1,2}:\d{2})\s+"
-            r"(\d{1,2}-[A-Za-z]{3})"
-            r".{0,30}?"
-            r"Delay:\s*([0-9:]+)",
-            re.IGNORECASE
-        )
-    ]
+    if scope is not None:
 
-    for pattern in departed_patterns:
+        banner = scope.select_one("h6.text-primary")
 
-        departed_match = pattern.search(
-            normalized_text
-        )
+        if banner:
 
-        if not departed_match:
-            continue
+            banner_info = _match_movement_banner(
+                clean_text(banner.get_text(" ", strip=True))
+            )
 
-        # Reject and keep trying the next pattern/case rather than returning: a match whose
-        # captured group isn't a plausible station name means the "at HH:MM DD-Mon" terminator
-        # this pattern expects wasn't actually nearby, and .+? backtracked across unrelated
-        # page content instead (see _sanitize_current_station).
-        sanitized = _sanitize_current_station(
-            departed_match.group(1)
-        )
-
-        if not sanitized:
-            continue
-
-        return {
-            "type": "Departed",
-            "current_station": sanitized,
-            "delay": clean_text(departed_match.group(4)),
-            "movement_time": departed_match.group(2),
-            "movement_date": departed_match.group(3),
-            "distance_km": None
-        }
+            if banner_info:
+                return banner_info
 
     # ========================================================
-    # CASE 2
+    # CASE 1 / CASE 2
     #
-    # Arrived at BHAWANI MANDI(BWM)
-    # at 11:46 14-Aug
-    # (Delay: 00:06)
+    # Same phrasing as CASE 0, but the dedicated element wasn't found -- fall back to
+    # searching for it within the wider (but still date-scoped) page text.
     # ========================================================
 
-    arrived_patterns = [
-        re.compile(
-            r"Arrived\s+at\s+"
-            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
-            r"\s+at\s+"
-            r"(\d{1,2}:\d{2})\s+"
-            r"(\d{1,2}-[A-Za-z]{3})"
-            r"\s*"
-            r"\(Delay:\s*([^)]+)\)",
-            re.IGNORECASE
-        ),
-        re.compile(
-            r"Arrived\s+at\s+"
-            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
-            r"\s+at\s+"
-            r"(\d{1,2}:\d{2})\s+"
-            r"(\d{1,2}-[A-Za-z]{3})"
-            r".{0,30}?"
-            r"Delay:\s*([0-9:]+)",
-            re.IGNORECASE
-        )
-    ]
+    banner_info = _match_movement_banner(normalized_text)
 
-    for pattern in arrived_patterns:
-
-        arrived_match = pattern.search(
-            normalized_text
-        )
-
-        if not arrived_match:
-            continue
-
-        sanitized = _sanitize_current_station(
-            arrived_match.group(1)
-        )
-
-        if not sanitized:
-            continue
-
-        return {
-            "type": "Arrived",
-            "current_station": sanitized,
-            "delay": clean_text(arrived_match.group(4)),
-            "movement_time": arrived_match.group(2),
-            "movement_date": arrived_match.group(3),
-            "distance_km": None
-        }
+    if banner_info:
+        return banner_info
 
     # ========================================================
     # CASE 3
@@ -1004,6 +1013,33 @@ def determine_train_status(
 
 
 # ============================================================
+# Resolve Active Date Scope
+# ============================================================
+
+def get_active_date_scope(soup):
+    """
+    NTES's spot-train page bundles several days into a single document: one
+    <div class="tab-pane ... active" id="trainDD-mon-yyyy"> block for the requested/current
+    date, plus one more such block per recent day the same train number ran (each with its
+    own already-completed "Reached Destination" banner and its own div.stopRow station
+    list) -- only the block carrying the "active" class is the date actually asked for.
+    Everything that reads the current-running banner or the station table must be scoped to
+    just this element; reading from the whole page mixes in unrelated days' banners and
+    station data (verified against a real captured NTES response).
+
+    Falls back to the whole soup if this structure isn't found, so a page that doesn't use
+    the multi-day-tabs layout (or a future markup change) degrades to the old behavior
+    instead of returning nothing.
+    """
+
+    active_scope = soup.select_one(
+        'div.tab-pane.active[id^="train"]'
+    )
+
+    return active_scope if active_scope else soup
+
+
+# ============================================================
 # Parse Route Header
 # ============================================================
 
@@ -1221,11 +1257,17 @@ def parse_train_response(
     }
 
     # ========================================================
-    # Full Page Text
+    # Active Date Scope
+    #
+    # See get_active_date_scope() -- the page bundles several days into one
+    # document, and everything below except train_no/train_name (which sit
+    # outside/above the per-date blocks) must be read from just today's block.
     # ========================================================
 
+    active_scope = get_active_date_scope(soup)
+
     full_text = clean_text(
-        soup.get_text(
+        active_scope.get_text(
             " ",
             strip=True
         )
@@ -1306,7 +1348,7 @@ def parse_train_response(
     # ========================================================
 
     route_source, route_destination = (
-        parse_route_header(soup)
+        parse_route_header(active_scope)
     )
 
     result["source"] = route_source
@@ -1320,7 +1362,8 @@ def parse_train_response(
 
     current_info = (
         parse_current_running_info(
-            full_text
+            full_text,
+            scope=active_scope
         )
     )
 
@@ -1377,7 +1420,7 @@ def parse_train_response(
     # STATIONS
     # ========================================================
 
-    stop_rows = soup.select(
+    stop_rows = active_scope.select(
         "div.stopRow"
     )
 
