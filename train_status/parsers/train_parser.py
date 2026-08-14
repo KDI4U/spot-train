@@ -233,6 +233,37 @@ def parse_station(row):
         )
     )
 
+    # --------------------------------------------------------
+    # Distance from source (KMs)
+    #
+    # Every halt except the source prints "Coach Position
+    # <N> KMs"; the source prints "Coach Position SRC" instead
+    # (i.e. 0 KMs). This is the only reliable, monotonically
+    # increasing signal available for "is the train past this
+    # station yet" -- scheduled/actual arrival & departure times
+    # are NOT reliable for that (NTES fills in a projected time
+    # for stations still ahead of the train too, not just ones
+    # it has actually reached).
+    # --------------------------------------------------------
+
+    if is_source:
+
+        distance_km = 0
+
+    else:
+
+        distance_match = re.search(
+            r"Coach\s+Position\s+(\d+)\s*KMs",
+            row_text,
+            re.IGNORECASE
+        )
+
+        distance_km = (
+            int(distance_match.group(1))
+            if distance_match
+            else None
+        )
+
     # ========================================================
     # FOUR TIMES
     #
@@ -508,6 +539,7 @@ def parse_station(row):
         "station": station,
         "code": code,
         "platform": platform,
+        "distance_km": distance_km,
 
         # Existing fields
         "arrival": arrival,
@@ -568,6 +600,44 @@ def clean_current_station_name(value):
 # Parse Current Running Information
 # ============================================================
 
+# Station names on NTES are always short (a handful of words) -- bounding every "station name"
+# capture group to this many characters means a regex that fails to find its expected terminator
+# nearby can never backtrack across the rest of the scraped page and swallow unrelated content
+# into current_station (see _sanitize_current_station for the second line of defense).
+MAX_STATION_NAME_CHARS = 60
+
+
+def _sanitize_current_station(name):
+    """
+    Rejects a captured "current station" value that is clearly not a station name -- either
+    because it's implausibly long, or because it contains markers (KMs, Coach Position,
+    Non-Stopping, ...) that only ever appear when a regex has swallowed unrelated page content.
+    This is a safety net independent of which pattern matched, since NTES's exact phrasing has
+    already been observed to drift (see the "on DD-Mon-YYYY HH:MM" vs "at HH:MM DD-Mon" cases
+    below) and may drift again.
+    """
+
+    if not name:
+        return None
+
+    cleaned = clean_current_station_name(name)
+
+    if not cleaned:
+        return None
+
+    if len(cleaned) > MAX_STATION_NAME_CHARS:
+        return None
+
+    if re.search(
+        r"\bKMs\b|Coach Position|Non-Stopping|Upcoming Station",
+        cleaned,
+        re.IGNORECASE
+    ):
+        return None
+
+    return cleaned
+
+
 def parse_current_running_info(full_text):
 
     # --------------------------------------------------------
@@ -575,11 +645,6 @@ def parse_current_running_info(full_text):
     # --------------------------------------------------------
 
     normalized_text = clean_text(full_text)
-
-    current_station = None
-    delay = None
-    movement_time = None
-    movement_date = None
 
     # ========================================================
     # CASE 1
@@ -592,7 +657,7 @@ def parse_current_running_info(full_text):
     departed_patterns = [
         re.compile(
             r"Departed\s+from\s+"
-            r"(.+?)"
+            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
             r"\s+at\s+"
             r"(\d{1,2}:\d{2})\s+"
             r"(\d{1,2}-[A-Za-z]{3})"
@@ -602,7 +667,7 @@ def parse_current_running_info(full_text):
         ),
         re.compile(
             r"Departed\s+from\s+"
-            r"(.+?)"
+            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
             r"\s+at\s+"
             r"(\d{1,2}:\d{2})\s+"
             r"(\d{1,2}-[A-Za-z]{3})"
@@ -612,46 +677,33 @@ def parse_current_running_info(full_text):
         )
     ]
 
-    departed_match = None
-
     for pattern in departed_patterns:
 
         departed_match = pattern.search(
             normalized_text
         )
 
-        if departed_match:
-            break
+        if not departed_match:
+            continue
 
-    if departed_match:
-
-        current_station = (
+        # Reject and keep trying the next pattern/case rather than returning: a match whose
+        # captured group isn't a plausible station name means the "at HH:MM DD-Mon" terminator
+        # this pattern expects wasn't actually nearby, and .+? backtracked across unrelated
+        # page content instead (see _sanitize_current_station).
+        sanitized = _sanitize_current_station(
             departed_match.group(1)
         )
 
-        movement_time = (
-            departed_match.group(2)
-        )
-
-        movement_date = (
-            departed_match.group(3)
-        )
-
-        delay = (
-            departed_match.group(4)
-        )
+        if not sanitized:
+            continue
 
         return {
             "type": "Departed",
-            "current_station":
-                clean_current_station_name(
-                    current_station
-                ),
-            "delay": clean_text(delay),
-            "movement_time":
-                movement_time,
-            "movement_date":
-                movement_date
+            "current_station": sanitized,
+            "delay": clean_text(departed_match.group(4)),
+            "movement_time": departed_match.group(2),
+            "movement_date": departed_match.group(3),
+            "distance_km": None
         }
 
     # ========================================================
@@ -665,7 +717,7 @@ def parse_current_running_info(full_text):
     arrived_patterns = [
         re.compile(
             r"Arrived\s+at\s+"
-            r"(.+?)"
+            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
             r"\s+at\s+"
             r"(\d{1,2}:\d{2})\s+"
             r"(\d{1,2}-[A-Za-z]{3})"
@@ -675,7 +727,7 @@ def parse_current_running_info(full_text):
         ),
         re.compile(
             r"Arrived\s+at\s+"
-            r"(.+?)"
+            r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
             r"\s+at\s+"
             r"(\d{1,2}:\d{2})\s+"
             r"(\d{1,2}-[A-Za-z]{3})"
@@ -685,58 +737,109 @@ def parse_current_running_info(full_text):
         )
     ]
 
-    arrived_match = None
-
     for pattern in arrived_patterns:
 
         arrived_match = pattern.search(
             normalized_text
         )
 
-        if arrived_match:
-            break
+        if not arrived_match:
+            continue
 
-    if arrived_match:
-
-        current_station = (
+        sanitized = _sanitize_current_station(
             arrived_match.group(1)
         )
 
-        movement_time = (
-            arrived_match.group(2)
-        )
-
-        movement_date = (
-            arrived_match.group(3)
-        )
-
-        delay = (
-            arrived_match.group(4)
-        )
+        if not sanitized:
+            continue
 
         return {
             "type": "Arrived",
-            "current_station":
-                clean_current_station_name(
-                    current_station
-                ),
-            "delay": clean_text(delay),
-            "movement_time":
-                movement_time,
-            "movement_date":
-                movement_date
+            "current_station": sanitized,
+            "delay": clean_text(arrived_match.group(4)),
+            "movement_time": arrived_match.group(2),
+            "movement_date": arrived_match.group(3),
+            "distance_km": None
         }
+
+    # ========================================================
+    # CASE 3
+    #
+    # NTES's per-station table row uses a different phrasing
+    # than the summary banner above (CASE 1/2): instead of
+    # "at HH:MM DD-Mon" it reads e.g.
+    #
+    #   RAJBANDH - RBH 151 KMs Departed from RAJBANDH (RBH)
+    #     on 14-Aug-2026 18:28
+    #   RANI KAMALAPATI - RKMP 1674 KMs Departed from
+    #     RANI KAMALAPATI (RKMP) on 14-Aug-2026 20:31
+    #
+    # The "STATION - CODE <N> KMs" prefix right before
+    # "Departed from/Arrived at/Reported from" is the only
+    # reliable distance-from-source signal available anywhere
+    # in the page for the live position itself (see distance_km
+    # on parse_station) -- captured here when present so the
+    # frontend can place the live marker between the correct
+    # two halts instead of guessing from arrival/departure data
+    # (which NTES also fills in as a projection for stations the
+    # train hasn't reached yet, so it can't be used for that).
+    # No "(Delay: ...)" is attached directly here -- delay for
+    # this case comes from the same page-wide fallback search
+    # used below.
+    # ========================================================
+
+    on_date_pattern = re.compile(
+        r"(?:[A-Z][A-Z0-9 .'\-]{0,%d}?\s*-\s*[A-Z0-9]+\s+(\d+)\s*KMs\s+" % MAX_STATION_NAME_CHARS +
+        r")?"
+        r"(?:Departed\s+from|Arrived\s+at|Reported\s+from)\s+"
+        r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
+        r"\s+on\s+"
+        r"\d{1,2}-[A-Za-z]{3}-\d{4}\s+"
+        r"\d{1,2}:\d{2}",
+        re.IGNORECASE
+    )
+
+    on_date_match = on_date_pattern.search(
+        normalized_text
+    )
+
+    if on_date_match:
+
+        sanitized = _sanitize_current_station(
+            on_date_match.group(2)
+        )
+
+        if sanitized:
+
+            delay_match = re.search(
+                r"\(Delay:\s*([^)]+)\)",
+                normalized_text,
+                re.IGNORECASE
+            )
+
+            return {
+                "type": "Running",
+                "current_station": sanitized,
+                "delay": clean_text(delay_match.group(1)) if delay_match else None,
+                "movement_time": None,
+                "movement_date": None,
+                "distance_km": int(on_date_match.group(1)) if on_date_match.group(1) else None
+            }
 
     # ========================================================
     # FALLBACK
     #
     # Sometimes NTES may return the current station and
-    # delay in a slightly different text layout.
+    # delay in a slightly different text layout. Still bounded
+    # and sanitized -- an unmatched terminator here must not
+    # fall through to garbage the way the unbounded version of
+    # this pattern used to.
     # ========================================================
 
     current_station_match = re.search(
         r"(?:Departed\s+from|Arrived\s+at)\s+"
-        r"(.+?)(?:\s+at\s+\d{1,2}:\d{2})",
+        r"(.{1,%d}?)" % MAX_STATION_NAME_CHARS +
+        r"(?:\s+at\s+\d{1,2}:\d{2})",
         normalized_text,
         re.IGNORECASE
     )
@@ -749,23 +852,20 @@ def parse_current_running_info(full_text):
 
     if current_station_match:
 
-        current_station = clean_current_station_name(
+        sanitized = _sanitize_current_station(
             current_station_match.group(1)
         )
 
-        if delay_match:
+        if sanitized:
 
-            delay = clean_text(
-                delay_match.group(1)
-            )
-
-        return {
-            "type": "Running",
-            "current_station": current_station,
-            "delay": delay,
-            "movement_time": None,
-            "movement_date": None
-        }
+            return {
+                "type": "Running",
+                "current_station": sanitized,
+                "delay": clean_text(delay_match.group(1)) if delay_match else None,
+                "movement_time": None,
+                "movement_date": None,
+                "distance_km": None
+            }
 
     # ========================================================
     # DEBUG
@@ -826,7 +926,8 @@ def parse_current_running_info(full_text):
         "current_station": None,
         "delay": None,
         "movement_time": None,
-        "movement_date": None
+        "movement_date": None,
+        "distance_km": None
     }
 
 
@@ -1113,6 +1214,7 @@ def parse_train_response(
         "destination": None,
         "status": None,
         "current_station": None,
+        "current_distance_km": None,
         "delay": None,
         "last_updated": None,
         "stations": []
@@ -1231,6 +1333,10 @@ def parse_train_response(
         current_info[
             "current_station"
         ]
+    )
+
+    result["current_distance_km"] = (
+        current_info.get("distance_km")
     )
 
     result["delay"] = (
