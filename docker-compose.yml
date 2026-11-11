@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  spot-train-api:
+    build: .
+    container_name: spot_train_api
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - PORT=8001
+      - HOST=0.0.0.0

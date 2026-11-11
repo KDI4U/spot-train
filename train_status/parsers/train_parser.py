@@ -1229,10 +1229,29 @@ def merge_duplicate_stations(stations):
 # ============================================================
 
 def parse_train_response(
-    html,
-    requested_train_no=None
+    html=None,
+    file_name=None,
+    requested_train_no=None,
+    html_content=None
 ):
 
+    # --------------------------------------------------------
+    # Read HTML (From memory or file)
+    # --------------------------------------------------------
+
+    if html is None:
+        html = html_content
+
+    if html is None and file_name:
+        with open(
+            file_name,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            html = f.read()
+
+    if html is None:
+        raise ValueError("html content or file_name must be provided")
     soup = BeautifulSoup(
         html,
         "html.parser"
